@@ -1,11 +1,8 @@
-#imports
 import cv2
 import numpy as np
 import mediapipe as mp
 import pandas as pd
 from datetime import datetime
-
-#Gaze Tracker class
 
 class GazeTracker:
     def __init__(self, video_path):
@@ -27,8 +24,7 @@ class GazeTracker:
         A = np.linalg.norm(np.array(eye_points[1]) - np.array(eye_points[5]))
         B = np.linalg.norm(np.array(eye_points[2]) - np.array(eye_points[4]))
         C = np.linalg.norm(np.array(eye_points[0]) - np.array(eye_points[3]))
-        ear = (A + B) / (2.0 * C)
-        return ear
+        return (A + B) / (2.0 * C)
 
     def get_pupil_position(self, eye_region):
         gray_eye = cv2.cvtColor(eye_region, cv2.COLOR_BGR2GRAY)
@@ -39,9 +35,7 @@ class GazeTracker:
             max_contour = max(contours, key=cv2.contourArea)
             M = cv2.moments(max_contour)
             if M["m00"] != 0:
-                cx = int(M["m10"] / M["m00"])
-                cy = int(M["m01"] / M["m00"])
-                return cx, cy
+                return int(M["m10"] / M["m00"]), int(M["m01"] / M["m00"])
         return None
 
     def get_head_pose(self, frame):
@@ -51,16 +45,15 @@ class GazeTracker:
             head_x = results.pose_landmarks.landmark[0].x
             head_y = results.pose_landmarks.landmark[0].y
             head_z = results.pose_landmarks.landmark[0].z
-            return (head_x, head_y, head_z)
+            return head_x, head_y, head_z
         return None
 
     def process_frame(self, frame, timestamp):
-        if timestamp - self.last_logged_time < 60:
-            return frame  # Only log data every minute
-        
-        self.last_logged_time = timestamp
         rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         results = self.face_mesh.process(rgb_frame)
+        left_eye_status, right_eye_status = "", ""
+        left_pupil_x, left_pupil_y, right_pupil_x, right_pupil_y = None, None, None, None
+
         if results.multi_face_landmarks:
             for face_landmarks in results.multi_face_landmarks:
                 for eye in ['left', 'right']:
@@ -69,21 +62,27 @@ class GazeTracker:
                         cv2.circle(frame, point, 2, (0, 255, 0), -1)
                     ear = self.get_eye_aspect_ratio(eye_points)
                     blink_detected = ear < 0.2
-                    x_min = min(p[0] for p in eye_points)
-                    x_max = max(p[0] for p in eye_points)
-                    y_min = min(p[1] for p in eye_points)
-                    y_max = max(p[1] for p in eye_points)
+                    x_min, x_max = min(p[0] for p in eye_points), max(p[0] for p in eye_points)
+                    y_min, y_max = min(p[1] for p in eye_points), max(p[1] for p in eye_points)
                     eye_region = frame[y_min:y_max, x_min:x_max]
                     pupil_position = self.get_pupil_position(eye_region)
-                    pupil_x, pupil_y = pupil_position if pupil_position else (None, None)
-                    status = "Blinking" if blink_detected else "Not Blinking"
-                    cv2.putText(frame, f"{eye.capitalize()} Eye: {status}", (x_min, y_min - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-                    self.data.append([timestamp, eye, status, pupil_x, pupil_y])
+                    if eye == 'left':
+                        left_eye_status = "Blinking" if blink_detected else "Not Blinking"
+                        if pupil_position:
+                            left_pupil_x, left_pupil_y = pupil_position
+                    else:
+                        right_eye_status = "Blinking" if blink_detected else "Not Blinking"
+                        if pupil_position:
+                            right_pupil_x, right_pupil_y = pupil_position
+                    cv2.putText(frame, f"{eye.capitalize()} Eye: {'Blinking' if blink_detected else 'Not Blinking'}", (x_min, y_min - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
                 self.drawing_utils.draw_landmarks(frame, face_landmarks, mp.solutions.face_mesh.FACEMESH_TESSELATION, self.drawing_spec)
         head_pose = self.get_head_pose(frame)
-        if head_pose:
-            cv2.putText(frame, f"Head Pose: {head_pose}", (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-            self.data.append([timestamp, "Head Pose", head_pose[0], head_pose[1], head_pose[2]])
+        head_x, head_y, head_z = head_pose if head_pose else (None, None, None)
+        cv2.putText(frame, f"Head Pose: {head_pose}", (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        if timestamp - self.last_logged_time >= 60:
+            print(f"Timestamp: {timestamp}, Left Eye: {left_eye_status}, Right Eye: {right_eye_status}, Left Pupil: ({left_pupil_x}, {left_pupil_y}), Right Pupil: ({right_pupil_x}, {right_pupil_y}), Head Pose: ({head_x}, {head_y}, {head_z})")
+            self.data.append([timestamp, left_eye_status, right_eye_status, left_pupil_x, left_pupil_y, right_pupil_x, right_pupil_y, head_x, head_y, head_z])
+            self.last_logged_time = timestamp
         return frame
 
     def run(self):
@@ -99,10 +98,10 @@ class GazeTracker:
                 break
         cap.release()
         cv2.destroyAllWindows()
-        df = pd.DataFrame(self.data, columns=["Timestamp", "Feature", "X", "Y", "Z"])
+        df = pd.DataFrame(self.data, columns=["Timestamp", "Left Eye Status", "Right Eye Status", "Left Pupil X", "Left Pupil Y", "Right Pupil X", "Right Pupil Y", "Head X", "Head Y", "Head Z"])
         df.to_excel(self.output_file, index=False)
         print(f"Data saved to {self.output_file}")
 
-#Usage
-gaze_tracker = GazeTracker("test_video.mp4")
+# Usage
+gaze_tracker = GazeTracker("video.mp4")
 gaze_tracker.run()
