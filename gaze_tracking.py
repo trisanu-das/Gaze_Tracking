@@ -18,24 +18,35 @@ class GazeTracker:
         self.data = []
         self.start_time = datetime.now()
         self.output_file = "gaze_tracking_data.xlsx"
-        self.last_logged_time = 0  # Store last recorded timestamp in seconds
+        self.last_logged_time = 0  # Store last logged timestamp in seconds
 
     def get_eye_aspect_ratio(self, eye_points):
         A = np.linalg.norm(np.array(eye_points[1]) - np.array(eye_points[5]))
         B = np.linalg.norm(np.array(eye_points[2]) - np.array(eye_points[4]))
         C = np.linalg.norm(np.array(eye_points[0]) - np.array(eye_points[3]))
-        return (A + B) / (2.0 * C)
+        ear = (A + B) / (2.0 * C)
+        return ear
 
     def get_pupil_position(self, eye_region):
+        if eye_region is None or eye_region.size == 0:
+            return None  # Skip if empty
+        
         gray_eye = cv2.cvtColor(eye_region, cv2.COLOR_BGR2GRAY)
         gray_eye = cv2.GaussianBlur(gray_eye, (7, 7), 0)
-        _, threshold_eye = cv2.threshold(gray_eye, 30, 255, cv2.THRESH_BINARY_INV)
-        contours, _ = cv2.findContours(threshold_eye, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+        # Adaptive thresholding for better segmentation
+        threshold_eye = cv2.adaptiveThreshold(gray_eye, 255,
+                                              cv2.ADAPTIVE_THRESH_MEAN_C,
+                                              cv2.THRESH_BINARY_INV, 11, 2)
+        # Optional: Display the thresholded eye for debugging
+        # cv2.imshow("Threshold Eye", threshold_eye)
+        contours, _ = cv2.findContours(threshold_eye, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         if contours:
             max_contour = max(contours, key=cv2.contourArea)
             M = cv2.moments(max_contour)
             if M["m00"] != 0:
-                return int(M["m10"] / M["m00"]), int(M["m01"] / M["m00"])
+                cx = int(M["m10"] / M["m00"])
+                cy = int(M["m01"] / M["m00"])
+                return cx, cy
         return None
 
     def get_head_pose(self, frame):
@@ -45,44 +56,98 @@ class GazeTracker:
             head_x = results.pose_landmarks.landmark[0].x
             head_y = results.pose_landmarks.landmark[0].y
             head_z = results.pose_landmarks.landmark[0].z
-            return head_x, head_y, head_z
-        return None
+            return (head_x, head_y, head_z)
+        return (None, None, None)
 
     def process_frame(self, frame, timestamp):
         rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         results = self.face_mesh.process(rgb_frame)
-        left_eye_status, right_eye_status = "", ""
-        left_pupil_x, left_pupil_y, right_pupil_x, right_pupil_y = None, None, None, None
+        
+        # Initialize feature variables
+        left_status, left_pupil_x, left_pupil_y = None, None, None
+        right_status, right_pupil_x, right_pupil_y = None, None, None
+        head_pose = (None, None, None)
 
         if results.multi_face_landmarks:
-            for face_landmarks in results.multi_face_landmarks:
-                for eye in ['left', 'right']:
-                    eye_points = [(int(face_landmarks.landmark[i].x * frame.shape[1]), int(face_landmarks.landmark[i].y * frame.shape[0])) for i in self.eye_indices[eye]]
-                    for point in eye_points:
-                        cv2.circle(frame, point, 2, (0, 255, 0), -1)
-                    ear = self.get_eye_aspect_ratio(eye_points)
-                    blink_detected = ear < 0.2
-                    x_min, x_max = min(p[0] for p in eye_points), max(p[0] for p in eye_points)
-                    y_min, y_max = min(p[1] for p in eye_points), max(p[1] for p in eye_points)
-                    eye_region = frame[y_min:y_max, x_min:x_max]
-                    pupil_position = self.get_pupil_position(eye_region)
-                    if eye == 'left':
-                        left_eye_status = "Blinking" if blink_detected else "Not Blinking"
-                        if pupil_position:
-                            left_pupil_x, left_pupil_y = pupil_position
-                    else:
-                        right_eye_status = "Blinking" if blink_detected else "Not Blinking"
-                        if pupil_position:
-                            right_pupil_x, right_pupil_y = pupil_position
-                    cv2.putText(frame, f"{eye.capitalize()} Eye: {'Blinking' if blink_detected else 'Not Blinking'}", (x_min, y_min - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-                self.drawing_utils.draw_landmarks(frame, face_landmarks, mp.solutions.face_mesh.FACEMESH_TESSELATION, self.drawing_spec)
-        head_pose = self.get_head_pose(frame)
-        head_x, head_y, head_z = head_pose if head_pose else (None, None, None)
-        cv2.putText(frame, f"Head Pose: {head_pose}", (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-        if timestamp - self.last_logged_time >= 60:
-            print(f"Timestamp: {timestamp}, Left Eye: {left_eye_status}, Right Eye: {right_eye_status}, Left Pupil: ({left_pupil_x}, {left_pupil_y}), Right Pupil: ({right_pupil_x}, {right_pupil_y}), Head Pose: ({head_x}, {head_y}, {head_z})")
-            self.data.append([timestamp, left_eye_status, right_eye_status, left_pupil_x, left_pupil_y, right_pupil_x, right_pupil_y, head_x, head_y, head_z])
+            # Use the first detected face
+            face_landmarks = results.multi_face_landmarks[0]
+            # ----- LEFT EYE -----
+            left_eye_points = [
+                (int(face_landmarks.landmark[i].x * frame.shape[1]),
+                 int(face_landmarks.landmark[i].y * frame.shape[0]))
+                for i in self.eye_indices['left']
+            ]
+            for pt in left_eye_points:
+                cv2.circle(frame, pt, 2, (0, 255, 0), -1)
+            left_ear = self.get_eye_aspect_ratio(left_eye_points)
+            left_status = "Blinking" if left_ear < 0.2 else "Not Blinking"
+            x_min_left = min(p[0] for p in left_eye_points)
+            x_max_left = max(p[0] for p in left_eye_points)
+            y_min_left = min(p[1] for p in left_eye_points)
+            y_max_left = max(p[1] for p in left_eye_points)
+            if y_max_left > y_min_left and x_max_left > x_min_left:
+                left_eye_region = frame[y_min_left:y_max_left, x_min_left:x_max_left]
+                left_pupil = self.get_pupil_position(left_eye_region)
+                if left_pupil:
+                    left_pupil_x, left_pupil_y = left_pupil
+                else:
+                    left_pupil_x, left_pupil_y = None, None
+            else:
+                left_pupil_x, left_pupil_y = None, None
+            cv2.putText(frame, f"Left Eye: {left_status}", (x_min_left, y_min_left - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+            
+            # ----- RIGHT EYE -----
+            right_eye_points = [
+                (int(face_landmarks.landmark[i].x * frame.shape[1]),
+                 int(face_landmarks.landmark[i].y * frame.shape[0]))
+                for i in self.eye_indices['right']
+            ]
+            for pt in right_eye_points:
+                cv2.circle(frame, pt, 2, (0, 255, 0), -1)
+            right_ear = self.get_eye_aspect_ratio(right_eye_points)
+            right_status = "Blinking" if right_ear < 0.2 else "Not Blinking"
+            x_min_right = min(p[0] for p in right_eye_points)
+            x_max_right = max(p[0] for p in right_eye_points)
+            y_min_right = min(p[1] for p in right_eye_points)
+            y_max_right = max(p[1] for p in right_eye_points)
+            if y_max_right > y_min_right and x_max_right > x_min_right:
+                right_eye_region = frame[y_min_right:y_max_right, x_min_right:x_max_right]
+                right_pupil = self.get_pupil_position(right_eye_region)
+                if right_pupil:
+                    right_pupil_x, right_pupil_y = right_pupil
+                else:
+                    right_pupil_x, right_pupil_y = None, None
+            else:
+                right_pupil_x, right_pupil_y = None, None
+            cv2.putText(frame, f"Right Eye: {right_status}", (x_min_right, y_min_right - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+            
+            # Draw face mesh landmarks for visualization
+            self.drawing_utils.draw_landmarks(frame, face_landmarks,
+                                              mp.solutions.face_mesh.FACEMESH_TESSELATION,
+                                              self.drawing_spec)
+            
+            # Get head pose
+            head_pose = self.get_head_pose(frame)
+            if head_pose and head_pose[0] is not None:
+                head_x, head_y, head_z = head_pose
+                cv2.putText(frame, f"Head Pose: X={head_x:.2f}, Y={head_y:.2f}, Z={head_z:.2f}",
+                            (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        else:
+            # No face detected; skip logging for this frame.
+            return frame
+
+        # Log the data every 60 seconds
+        if (head_pose[0] is not None and 
+            timestamp - self.last_logged_time >= 60):
+            row = [timestamp, head_pose[0], head_pose[1], head_pose[2],
+                   left_status, left_pupil_x, left_pupil_y,
+                   right_status, right_pupil_x, right_pupil_y]
+            self.data.append(row)
             self.last_logged_time = timestamp
+            print("Logging row:", row)
+
         return frame
 
     def run(self):
@@ -98,7 +163,10 @@ class GazeTracker:
                 break
         cap.release()
         cv2.destroyAllWindows()
-        df = pd.DataFrame(self.data, columns=["Timestamp", "Left Eye Status", "Right Eye Status", "Left Pupil X", "Left Pupil Y", "Right Pupil X", "Right Pupil Y", "Head X", "Head Y", "Head Z"])
+        columns = ["Timestamp", "Head Pose X", "Head Pose Y", "Head Pose Z",
+                   "Left Eye Status", "Left Pupil X", "Left Pupil Y",
+                   "Right Eye Status", "Right Pupil X", "Right Pupil Y"]
+        df = pd.DataFrame(self.data, columns=columns)
         df.to_excel(self.output_file, index=False)
         print(f"Data saved to {self.output_file}")
 
