@@ -1,11 +1,16 @@
+#imports
 import cv2
 import numpy as np
 import mediapipe as mp
 import pandas as pd
 from datetime import datetime
 
+blinks = 0
+
+#The Class
+
 class GazeTracker:
-    def __init__(self, video_path):
+    def __init__(self, video_path, out_path):
         self.video_path = video_path
         self.face_mesh = mp.solutions.face_mesh.FaceMesh(refine_landmarks=True)
         self.pose = mp.solutions.pose.Pose()
@@ -17,7 +22,7 @@ class GazeTracker:
         }
         self.data = []
         self.start_time = datetime.now()
-        self.output_file = "gaze_tracking_data.xlsx"
+        self.output_file = out_path
         self.last_logged_time = 0  # Store last logged timestamp in seconds
 
     def get_eye_aspect_ratio(self, eye_points):
@@ -69,6 +74,7 @@ class GazeTracker:
         head_pose = (None, None, None)
 
         if results.multi_face_landmarks:
+            global blinks
             # Use the first detected face
             face_landmarks = results.multi_face_landmarks[0]
             # ----- LEFT EYE -----
@@ -77,10 +83,9 @@ class GazeTracker:
                  int(face_landmarks.landmark[i].y * frame.shape[0]))
                 for i in self.eye_indices['left']
             ]
-            for pt in left_eye_points:
-                cv2.circle(frame, pt, 2, (0, 255, 0), -1)
             left_ear = self.get_eye_aspect_ratio(left_eye_points)
             left_status = "Blinking" if left_ear < 0.2 else "Not Blinking"
+            blinks += (1 if left_ear < 0.2 else 0)
             x_min_left = min(p[0] for p in left_eye_points)
             x_max_left = max(p[0] for p in left_eye_points)
             y_min_left = min(p[1] for p in left_eye_points)
@@ -94,8 +99,6 @@ class GazeTracker:
                     left_pupil_x, left_pupil_y = None, None
             else:
                 left_pupil_x, left_pupil_y = None, None
-            cv2.putText(frame, f"Left Eye: {left_status}", (x_min_left, y_min_left - 10),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
             
             # ----- RIGHT EYE -----
             right_eye_points = [
@@ -103,10 +106,9 @@ class GazeTracker:
                  int(face_landmarks.landmark[i].y * frame.shape[0]))
                 for i in self.eye_indices['right']
             ]
-            for pt in right_eye_points:
-                cv2.circle(frame, pt, 2, (0, 255, 0), -1)
             right_ear = self.get_eye_aspect_ratio(right_eye_points)
             right_status = "Blinking" if right_ear < 0.2 else "Not Blinking"
+            blinks += (1 if left_ear < 0.2 else 0)
             x_min_right = min(p[0] for p in right_eye_points)
             x_max_right = max(p[0] for p in right_eye_points)
             y_min_right = min(p[1] for p in right_eye_points)
@@ -120,20 +122,12 @@ class GazeTracker:
                     right_pupil_x, right_pupil_y = None, None
             else:
                 right_pupil_x, right_pupil_y = None, None
-            cv2.putText(frame, f"Right Eye: {right_status}", (x_min_right, y_min_right - 10),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
             
-            # Draw face mesh landmarks for visualization
-            self.drawing_utils.draw_landmarks(frame, face_landmarks,
-                                              mp.solutions.face_mesh.FACEMESH_TESSELATION,
-                                              self.drawing_spec)
             
             # Get head pose
             head_pose = self.get_head_pose(frame)
             if head_pose and head_pose[0] is not None:
                 head_x, head_y, head_z = head_pose
-                cv2.putText(frame, f"Head Pose: X={head_x:.2f}, Y={head_y:.2f}, Z={head_z:.2f}",
-                            (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
         else:
             # No face detected; skip logging for this frame.
             return frame
@@ -146,7 +140,6 @@ class GazeTracker:
                    right_status, right_pupil_x, right_pupil_y]
             self.data.append(row)
             self.last_logged_time = timestamp
-            print("Logging row:", row)
 
         return frame
 
@@ -158,7 +151,6 @@ class GazeTracker:
                 break
             timestamp = (datetime.now() - self.start_time).total_seconds()
             frame = self.process_frame(frame, timestamp)
-            cv2.imshow('Gaze Tracker', frame)
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
         cap.release()
@@ -167,9 +159,5 @@ class GazeTracker:
                    "Left Eye Status", "Left Pupil X", "Left Pupil Y",
                    "Right Eye Status", "Right Pupil X", "Right Pupil Y"]
         df = pd.DataFrame(self.data, columns=columns)
-        df.to_excel(self.output_file, index=False)
+        df.to_csv(self.output_file, index=False)
         print(f"Data saved to {self.output_file}")
-
-# Usage
-gaze_tracker = GazeTracker("video.mp4")
-gaze_tracker.run()
